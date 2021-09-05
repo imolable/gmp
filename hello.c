@@ -1,6 +1,7 @@
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
 // #include <semaphore.h>
 
@@ -11,6 +12,8 @@
 		put_Fn(a); \
 	}
 
+extern void sys_write_call(char*, int);
+
 typedef void (*Fn)(void);
 typedef struct Node Node;
 typedef struct Queue Queue;
@@ -20,16 +23,23 @@ typedef struct P P;
 typedef struct M M;
 
 struct G {
+	char* stack[1024];
 	Fn f;
 	G* next;
 };
 
 struct P {
-
 	G* gfree;
 
 	pthread_mutex_t mutex;
 	pthread_cond_t nonEmpty;
+};
+
+struct M {
+	P* p;
+	pthread_t t;
+
+	void* (*process)(M*);
 };
 
 void p_init(P* p)
@@ -40,7 +50,6 @@ void p_init(P* p)
 
 G* get_g(P* p)
 {
-
 	pthread_mutex_lock(&p->mutex);
 
 	while (p->gfree == NULL) {
@@ -76,24 +85,8 @@ void put_g(P* p, G* g)
 	pthread_mutex_unlock(&p->mutex);
 }
 
-struct M {
-	P* p;
-	pthread_t t;
-
-	void* (*process)(M*);
-};
-
-void* process(M*);
-void m_init(M* m, P* p)
-{
-	m->p = p;
-	m->process = process;
-	pthread_create(&m->t, NULL, (void*)m->process, m);
-};
-
 void* process(M* m)
 {
-
 	while (1) {
 		G* g = get_g(m->p);
 		(g->f)();
@@ -102,16 +95,27 @@ void* process(M* m)
 
 	return NULL;
 }
+
+void m_init(M* m, P* p)
+{
+	m->p = p;
+	m->process = process;
+	pthread_create(&m->t, NULL, (void*)m->process, m);
+};
+
 void print_a()
 {
 	for (int i = 0; i < N; i++) {
-		printf("AA_%d\n", i);
+		char src[10];
+		sprintf(src, "AA_%d\n", i + 1);
+		printf("len:%d\n", (int)strlen(src));
+		sys_write_call(src, strlen(src));
+		//	printf("%s", src);
 	}
 }
 
 void print_b()
 {
-
 	for (int i = 0; i < N; i++) {
 		printf("BBB_%d\n", i);
 	}
@@ -143,6 +147,7 @@ int main()
 
 	M m;
 	m_init(&m, &p);
+	printf("G size: %d \n", (int)sizeof(G));
 
 	sleep(1);
 
