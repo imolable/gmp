@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <stdlib.h>
 
 extern int call_asm(void*);
 
@@ -42,11 +43,4 @@ void call(void* v)
 
 int main()
 {
-
-	int r = call_asm(print_hello);
-
-	//r = 9;
-	printf("--- --- %d \n", r);
-
-	//call(print_hello);
 }

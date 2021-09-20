@@ -1,6 +1,11 @@
-
-.globl main, print_hello
+.global main
 
 main:
-call print_hello
-ret
+pushq %rbp
+movq %rsp, %rbp
+
+movq $10, bb(%rip)
+	call print_hello
+
+	leave
+	ret
