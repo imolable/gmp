@@ -4,6 +4,12 @@
 #include <string.h>
 #include <unistd.h>
 
+typedef struct Demo {
+	int a;
+	void* b;
+	int c;
+} Demo;
+
 int bb;
 int aa = 22;
 int cc = 33;
@@ -11,6 +17,8 @@ int cc = 33;
 int* ap;
 
 int* (*fn)();
+
+Demo demo;
 
 int* get_bb()
 {
@@ -28,11 +36,10 @@ int getbb()
 	return bb + aa + cc;
 }
 
-// void *consume(void * nop)
-// {
-//     printf("hello consume:%d\n", bb);
-//     return NULL;
-// }
+int* get_demo()
+{
+	return &demo.c;
+}
 
 void print_hello()
 {

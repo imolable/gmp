@@ -1,22 +1,23 @@
+#define _GNU_SOURCE
+
+#include <errno.h>
 #include <pthread.h>
+#include <sched.h>
+#include <semaphore.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-// #include <semaphore.h>
 
 #define N 10
-#define P_SIZE 3
-#define G_STACK_SIZE 1024
+#define P_SIZE 2
+#define G_SIZE_PER_P 2
+#define G_STACK_SIZE (1024 * 8)
 
 #define CR(a)     \
 	{             \
 		new_g(a); \
 	}
-
-typedef void (*Fn)(void);
-typedef struct Node Node;
-typedef struct Queue Queue;
 
 typedef struct G G;
 typedef struct P P;
@@ -24,19 +25,20 @@ typedef struct M M;
 typedef struct Gobuf Gobuf;
 typedef struct Sched Sched;
 
+typedef void (*Fn)(void);
+
 void print_a();
 void print_b();
 void print_c();
-void print_hello();
+void print_d();
 
 extern void* schedule();
 extern void sys_write_call(char*, int) asm("sys_write_call");
-extern void cr(Gobuf*, Fn) asm("cr");
-extern void save_g_sp(void*);
-extern void switch_to();
-extern void _switch_to(Gobuf*) asm("_switch_to");
+extern void cr_call(Gobuf*, Fn) asm("cr_call");
+extern void cr_switch(Gobuf*) asm("cr_switch");
 extern void put_g(P* p, G* g);
-
+extern P* get_idle_p();
+extern void new_m(P*);
 extern void* gexit();
 
 typedef enum GStatus {
@@ -45,21 +47,29 @@ typedef enum GStatus {
 	Gdead,
 } GStatus;
 
+typedef struct GQueue {
+	G* head;
+	G* tail;
+	int gsize;
+} GQueue;
+
 struct Sched {
 	P* idle_p;
+	GQueue global_q;
 
 	M* m;
 
 	pthread_mutex_t mutex;
+	pthread_cond_t nonEmpty;
 };
 
 struct Gobuf {
 	void* sp;
-	void* exit;
+	void* pc;
 };
 
 struct G {
-	char* stack[1024];
+	void* stack_base;
 	Gobuf gobuf;
 	Fn f;
 	G* next;
@@ -67,7 +77,7 @@ struct G {
 };
 
 struct P {
-	G* runq;
+	GQueue runq;
 
 	P* next;
 
@@ -76,116 +86,264 @@ struct P {
 };
 
 struct M {
+	G* g0;
 	P* p;
-	pthread_t t;
-
-	void* (*process)(M*);
 };
 
-Sched sched;
-
-M* m;
-G* g;
-
-M m0;
-
-void save_g_sp(void* sp)
+void enqueue(GQueue* q, G* g)
 {
-	g->gobuf.sp = sp;
-	g->gobuf.exit = (void*)-1;
-	//printf("---------- save sp:%p !!! ----- \n", sp);
+
+	if (q->gsize == 0) {
+		q->head = g;
+		q->tail = g;
+		q->gsize = 1;
+	} else {
+		q->tail->next = g;
+		q->tail = g;
+		g->next = NULL;
+		q->gsize++;
+	}
 }
 
-void switch_to()
+G* dequeue(GQueue* q)
 {
-	schedule();
-}
+	G* r = q->head;
 
-G* get_g(P* p)
-{
-	pthread_mutex_lock(&p->mutex);
-
-	G* g = p->runq;
-	while (1) {
-		while (g == NULL) {
-			//printf("------- mutex wait ----------------\n");
-			//			pthread_cond_wait(&p->nonEmpty, &p->mutex);
-			g = p->runq;
-		}
-
-		if (g->gs == Grunnable) {
-			p->runq = g->next;
-			break;
-		} else {
-			g = g->next;
-		}
+	if (r != NULL) {
+		q->head = r->next;
+		q->gsize--;
 	}
 
-	pthread_mutex_unlock(&p->mutex);
+	return r;
+}
+Sched sched;
+
+// current running m
+__thread M* m;
+// current running g
+__thread G* g;
+
+M m0;
+G g0;
+
+G* malloc_g(int stack_size)
+{
+
+	G* g = malloc(sizeof(G));
+
+	void* mc = malloc(stack_size);
+	g->stack_base = mc + stack_size;
 
 	return g;
 }
 
-void put_g(P* p, G* g)
+void new_g(Fn f)
 {
-	pthread_mutex_lock(&p->mutex);
+	G* g = malloc_g(G_STACK_SIZE);
+	g->f = f;
+	g->gobuf.sp = g->stack_base;
+	g->gobuf.pc = gexit;
+	g->gs = Grunnable;
 
-	if (p->runq == NULL) {
-		p->runq = g;
-	} else {
-		G* gp = p->runq;
-		while (gp) {
-			g->next = gp;
-			gp = gp->next;
-		}
-		g->next->next = g;
-		g->next = NULL;
+	put_g(m->p, g);
+}
+
+G* get_g(P* p)
+{
+
+	G* g = dequeue(&p->runq);
+	if (g != NULL) {
+		return g;
 	}
 
-	pthread_mutex_unlock(&p->mutex);
+	pthread_mutex_lock(&sched.mutex);
+
+	for (int i = 0; i < G_SIZE_PER_P; i++) {
+
+		G* g = dequeue(&sched.global_q);
+		while (g == NULL && i == 0) {
+			pthread_cond_wait(&sched.nonEmpty, &sched.mutex);
+			g = dequeue(&sched.global_q);
+		}
+
+		if (g == NULL) {
+			break;
+		}
+
+		enqueue(&p->runq, g);
+	}
+
+	pthread_mutex_unlock(&sched.mutex);
+
+	return dequeue(&p->runq);
+}
+
+void put_g(P* p, G* g)
+{
+
+	if (p->runq.gsize < G_SIZE_PER_P) {
+		enqueue(&p->runq, g);
+		return;
+	}
+
+	pthread_mutex_lock(&sched.mutex);
+
+	enqueue(&sched.global_q, g);
+
+	pthread_cond_signal(&sched.nonEmpty);
+	pthread_mutex_unlock(&sched.mutex);
+
+	P* idle_p = get_idle_p();
+	if (idle_p != NULL) {
+		new_m(idle_p);
+	}
+}
+
+void* gexit()
+{
+	g->gs = Gdead;
+	free(g);
+
+	printf("--- g dead --- \n");
+	schedule();
+
+	return NULL;
+}
+
+P* new_p()
+{
+	P* mp = (P*)malloc(sizeof(P));
+	mp->runq.gsize = 0;
+
+	pthread_mutex_init(&mp->mutex, NULL);
+	pthread_cond_init(&mp->nonEmpty, NULL);
+
+	return mp;
+}
+
+P* get_idle_p()
+{
+	pthread_mutex_lock(&sched.mutex);
+
+	P* p = sched.idle_p;
+	if (p != NULL) {
+		sched.idle_p = p->next;
+	}
+
+	pthread_mutex_unlock(&sched.mutex);
+
+	return p;
+}
+
+void start_m(M* mm)
+{
+	m = mm;
+
+	schedule();
+}
+
+void run_m()
+{
+
+	if (g != m->g0) {
+		printf("bad run\n");
+		exit(-1);
+	}
+
+	schedule();
+}
+
+int clone_start(M* mm)
+{
+	m = mm;
+	g = mm->g0;
+
+	run_m();
+
+	return 0;
+}
+
+void new_m(P* p)
+{
+
+	M* mm = (M*)malloc(sizeof(M));
+	mm->p = p;
+
+	int thread_stack_size = 1024;
+	G* g0 = malloc_g(thread_stack_size);
+
+	mm->g0 = g0;
+
+	pthread_attr_t attr;
+	pthread_attr_init(&attr);
+	pthread_attr_setstack(&attr, g0->stack_base, thread_stack_size);
+
+	pthread_t t;
+	int r = pthread_create(&t, &attr, (void*)clone_start, mm);
+	if (r != 0) {
+		printf("pthread create failed, r: %d\n", r);
+		exit(-1);
+	}
+}
+
+void init_sched()
+{
+	m->p = new_p();
+
+	for (int i = 1; i < P_SIZE; i++) {
+
+		P* mp = new_p();
+		mp->next = sched.idle_p;
+		sched.idle_p = mp;
+	}
+
+	pthread_mutex_init(&sched.mutex, NULL);
+	pthread_cond_init(&sched.nonEmpty, NULL);
 }
 
 void* schedule()
 {
 	P* p = m->p;
 
-	if (g != NULL) {
+	if (g != NULL && g->gs == Grunning) {
 		g->gs = Grunnable;
 		put_g(p, g);
 	}
 
 	G* rg = get_g(p);
+	if (rg == NULL) {
+		printf(" --- g is null, sleep \n");
+		return NULL;
+	}
 	rg->gs = Grunning;
 	g = rg;
 
-	// printf("g stack: %p \n", g->gobuf.sp);
-	// printf("g stack: %p \n", g->stack);
-
-	if (g->gobuf.exit == gexit) {
-		cr(&g->gobuf, g->f);
+	if (g->gobuf.pc == gexit) {
+		cr_call(&g->gobuf, g->f);
 	}
-	//	printf("---------- done !!! -----\n");
 
-	_switch_to(&g->gobuf);
+	cr_switch(&g->gobuf);
 
 	return NULL;
 }
 
-void* gexit()
+int _main()
 {
-	g->gs = Gdead;
-	g = NULL;
 
-	printf(" -------- done --- \n");
-	schedule();
+	printf("main start! \n");
 
-	return NULL;
+	CR(print_a);
+	CR(print_b);
+	CR(print_c);
+	CR(print_d);
+
+	printf("main done! \n");
+	return 0;
 }
 
 void print_a()
 {
 	for (int i = 0; i < N; i++) {
-		//printf("--------a:%d\n", i);
 		char src[10];
 		sprintf(src, "AA_%d\n", i);
 		sys_write_call(src, strlen(src));
@@ -212,99 +370,7 @@ void print_c()
 
 void print_d()
 {
-	printf("=== New === \n");
-}
-
-void new_g(Fn f)
-{
-	G* g = malloc(sizeof(G));
-
-	g->f = f;
-	g->gobuf.sp = g->stack + 1024;
-	g->gobuf.exit = gexit;
-	g->gs = Grunnable;
-
-	put_g(m->p, g);
-}
-
-void print_hello()
-{
-	printf(" ---- hello --- \n");
-}
-
-P* new_p()
-{
-	P* mp = (P*)malloc(sizeof(P));
-
-	pthread_mutex_init(&mp->mutex, NULL);
-	pthread_cond_init(&mp->nonEmpty, NULL);
-
-	return mp;
-}
-
-void init_sched()
-{
-
-	m->p = new_p();
-
-	for (int i = 1; i < P_SIZE; i++) {
-
-		P* mp = new_p();
-		mp->next = sched.idle_p;
-		sched.idle_p = mp;
-
-		printf("--- --- init: %d\n", i);
+	for (int i = 0; i < N / 3; i++) {
+		printf("DDDDD_%d\n", i);
 	}
-
-	pthread_mutex_init(&sched.mutex, NULL);
-}
-
-P* get_idle_p()
-{
-	pthread_mutex_lock(&sched.mutex);
-
-	P* p = sched.idle_p;
-	if (p != NULL) {
-		sched.idle_p = p->next;
-	}
-
-	pthread_mutex_unlock(&sched.mutex);
-
-	return p;
-}
-
-void start_m(M* mm)
-{
-	m = mm;
-
-	schedule();
-}
-
-void new_m(P* p)
-{
-
-	M* mm = (M*)malloc(sizeof(M));
-	mm->p = p;
-
-	pthread_t t;
-	pthread_create(&t, NULL, (void*)start_m, mm);
-}
-
-int _main()
-{
-
-	printf("G size: %d \n", (int)sizeof(G));
-
-	printf("hello world\n");
-	CR(print_a);
-	CR(print_b);
-	CR(print_c);
-
-	sleep(2);
-	CR(print_d);
-
-	sleep(1);
-	//getchar();
-
-	return 0;
 }

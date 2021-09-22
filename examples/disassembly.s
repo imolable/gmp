@@ -1,4 +1,4 @@
-	.file	"nomain.c"
+	.file	"disassembly.c"
 	.text
 	.globl	bb
 	.bss
@@ -33,6 +33,12 @@ ap:
 	.size	fn, 8
 fn:
 	.zero	8
+	.globl	demo
+	.align 16
+	.type	demo, @object
+	.size	demo, 24
+demo:
+	.zero	24
 	.text
 	.globl	get_bb
 	.type	get_bb, @function
@@ -82,6 +88,24 @@ getbb:
 	.cfi_endproc
 .LFE7:
 	.size	getbb, .-getbb
+	.globl	get_demo
+	.type	get_demo, @function
+get_demo:
+.LFB8:
+	.cfi_startproc
+	endbr64
+	pushq	%rbp
+	.cfi_def_cfa_offset 16
+	.cfi_offset 6, -16
+	movq	%rsp, %rbp
+	.cfi_def_cfa_register 6
+	leaq	16+demo(%rip), %rax
+	popq	%rbp
+	.cfi_def_cfa 7, 8
+	ret
+	.cfi_endproc
+.LFE8:
+	.size	get_demo, .-get_demo
 	.section	.rodata
 .LC0:
 	.string	"hello world:%d\n"
@@ -89,7 +113,7 @@ getbb:
 	.globl	print_hello
 	.type	print_hello, @function
 print_hello:
-.LFB8:
+.LFB9:
 	.cfi_startproc
 	endbr64
 	pushq	%rbp
@@ -107,7 +131,7 @@ print_hello:
 	.cfi_def_cfa 7, 8
 	ret
 	.cfi_endproc
-.LFE8:
+.LFE9:
 	.size	print_hello, .-print_hello
 	.ident	"GCC: (Ubuntu 10.3.0-1ubuntu1) 10.3.0"
 	.section	.note.GNU-stack,"",@progbits
