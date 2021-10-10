@@ -5,21 +5,17 @@
 // buf in rdi, f in rsi
 cr_call:
 
-movq %rbp, %r10
-movq %rsp, %r11
-
 movq (%rdi), %rax
 movq %rax, %rsp
 movq %rsp, %rbp
 
-pushq %r11
-pushq %r10
+// push buf.pc
+movq 8(%rdi), %rax
+pushq %rax
 
 movq %rsi, %rax
 // call f
-call *%rax
+jmp *%rax
 
-popq %rbp
-popq %rsp
 
 ret

@@ -12,7 +12,7 @@
 #define N 10
 #define P_SIZE 2
 #define G_SIZE_PER_P 2
-#define G_STACK_SIZE (1024)
+#define G_STACK_SIZE (1024 * 2)
 
 #define CR(a)     \
 	{             \
@@ -36,6 +36,8 @@ extern void cr_call(Gobuf*, Fn) asm("cr_call");
 extern void put_g(G* g);
 extern P* get_idle_p();
 extern void new_m(P*);
+extern void* gexit();
+extern void* schedule();
 
 typedef struct GQueue {
 	G* head;
@@ -77,6 +79,9 @@ struct P {
 struct M {
 	P* p;
 };
+
+// current running m
+__thread M* m;
 
 void enqueue(GQueue* q, G* g)
 {
@@ -123,6 +128,7 @@ void new_g(Fn f)
 
 	g->f = f;
 	g->gobuf.sp = g->stack_base;
+	g->gobuf.pc = gexit;
 
 	put_g(g);
 }
@@ -173,6 +179,14 @@ void put_g(G* g)
 	}
 }
 
+void* gexit()
+{
+	puts("--- g dead --- ");
+	schedule();
+
+	return NULL;
+}
+
 P* new_p()
 {
 	P* mp = (P*)malloc(sizeof(P));
@@ -200,12 +214,9 @@ P* get_idle_p()
 
 int clone_start(M* mm)
 {
-	P* p = mm->p;
+	m = mm;
 
-	while (1) {
-		G* g = get_g(p);
-		cr_call(&g->gobuf, g->f);
-	}
+	schedule();
 
 	return 0;
 }
@@ -235,6 +246,15 @@ void init_sched()
 
 	pthread_mutex_init(&sched.mutex, NULL);
 	pthread_cond_init(&sched.nonEmpty, NULL);
+}
+
+void* schedule()
+{
+	G* g = get_g(m->p);
+
+	cr_call(&g->gobuf, g->f);
+
+	return NULL;
 }
 
 int main()
