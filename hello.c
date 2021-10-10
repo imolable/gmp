@@ -10,9 +10,9 @@
 #include <unistd.h>
 
 #define N 10
-#define P_SIZE 2
-#define G_SIZE_PER_P 2
-#define G_STACK_SIZE (1024)
+#define P_SIZE 1
+#define G_SIZE_PER_P 20
+#define G_STACK_SIZE (1024 * 2)
 
 #define CR(a)     \
 	{             \
@@ -33,39 +33,53 @@ void print_c();
 void print_d();
 
 extern void cr_call(Gobuf*, Fn) asm("cr_call");
-extern void put_g(G* g);
+extern void write_call(char*, int) asm("write_call");
+extern void cr_switch(Gobuf*) asm("cr_switch");
+extern void put_g(P* p, G* g);
 extern P* get_idle_p();
 extern void new_m(P*);
+extern void* gexit();
+extern void* schedule();
 
-typedef struct GQueue {
+typedef enum GStatus {
+	Grunnable,
+	Grunning,
+	Gdead,
+} GStatus;
+
+typedef struct GQueue
+{
 	G* head;
 	G* tail;
 	int gsize;
 } GQueue;
 
-struct Sched {
+struct Sched
+{
 	P* idle_p;
 	GQueue global_q;
-
-	M* m;
 
 	pthread_mutex_t mutex;
 	pthread_cond_t nonEmpty;
 };
 
-struct Gobuf {
+struct Gobuf
+{
 	void* sp;
 	void* pc;
 };
 
-struct G {
+struct G
+{
 	void* stack_base;
 	Gobuf gobuf;
 	Fn f;
 	G* next;
+	GStatus status;
 };
 
-struct P {
+struct P
+{
 	GQueue runq;
 
 	P* next;
@@ -74,9 +88,17 @@ struct P {
 	pthread_cond_t nonEmpty;
 };
 
-struct M {
+struct M
+{
 	P* p;
 };
+
+// current running m
+__thread M* m;
+// current running g
+__thread G* g;
+
+Sched sched;
 
 void enqueue(GQueue* q, G* g)
 {
@@ -105,8 +127,6 @@ G* dequeue(GQueue* q)
 	return r;
 }
 
-Sched sched;
-
 G* malloc_g(int stack_size)
 {
 	G* g = malloc(sizeof(G));
@@ -123,8 +143,10 @@ void new_g(Fn f)
 
 	g->f = f;
 	g->gobuf.sp = g->stack_base;
+	g->gobuf.pc = gexit;
+	g->status = Grunnable;
 
-	put_g(g);
+	put_g(m->p, g);
 }
 
 G* get_g(P* p)
@@ -157,8 +179,12 @@ G* get_g(P* p)
 	return dequeue(&p->runq);
 }
 
-void put_g(G* g)
+void put_g(P* p, G* g)
 {
+	if (p->runq.gsize < G_SIZE_PER_P) {
+		enqueue(&p->runq, g);
+		return;
+	}
 
 	pthread_mutex_lock(&sched.mutex);
 
@@ -171,6 +197,18 @@ void put_g(G* g)
 	if (idle_p != NULL) {
 		new_m(idle_p);
 	}
+}
+
+void* gexit()
+{
+	puts("--- g dead --- ");
+
+	g->status = Gdead;
+	free(g);
+
+	schedule();
+
+	return NULL;
 }
 
 P* new_p()
@@ -200,12 +238,9 @@ P* get_idle_p()
 
 int clone_start(M* mm)
 {
-	P* p = mm->p;
+	m = mm;
 
-	while (1) {
-		G* g = get_g(p);
-		cr_call(&g->gobuf, g->f);
-	}
+	schedule();
 
 	return 0;
 }
@@ -226,7 +261,8 @@ void new_m(P* p)
 void init_sched()
 {
 
-	for (int i = 0; i < P_SIZE; i++) {
+	for (int i = 0; i < P_SIZE; i++)
+	{
 
 		P* mp = new_p();
 		mp->next = sched.idle_p;
@@ -237,9 +273,38 @@ void init_sched()
 	pthread_cond_init(&sched.nonEmpty, NULL);
 }
 
+void* schedule()
+{
+	P* p = m->p;
+
+	if (g != NULL && g->status == Grunning)
+	{
+		g->status = Grunnable;
+		put_g(p, g);
+	}
+
+	G* gotg = get_g(m->p);
+	gotg->status = Grunning;
+	g = gotg;
+
+	if (g->gobuf.pc == gexit)
+	{
+		cr_call(&g->gobuf, g->f);
+	}
+
+	cr_switch(&g->gobuf);
+	return NULL;
+}
+
 int main()
 {
 	puts("main start! \n");
+
+	M mm;
+	mm.p = new_p();
+	mm.p->runq.gsize = G_SIZE_PER_P;
+
+	m = &mm;
 
 	init_sched();
 
@@ -257,21 +322,27 @@ int main()
 void print_a()
 {
 	for (int i = 0; i < N; i++) {
-		printf("AA_%d\n", i);
+		char src[10];
+		sprintf(src, "AA_%d\n", i);
+		write_call(src, strlen(src));
 	}
 }
 
 void print_b()
 {
 	for (int i = 0; i < 2 * N; i++) {
-		printf("BBB_%d\n", i);
+		char src[10];
+		sprintf(src, "BBB_%d\n", i);
+		write_call(src, strlen(src));
 	}
 }
 
 void print_c()
 {
 	for (int i = 0; i < N * 3 / 2; i++) {
-		printf("CCCC_%d\n", i);
+		char src[10];
+		sprintf(src, "CCCC_%d\n", i);
+		write_call(src, strlen(src));
 	}
 }
 
