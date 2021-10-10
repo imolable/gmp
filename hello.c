@@ -22,6 +22,7 @@
 typedef struct G G;
 typedef struct P P;
 typedef struct M M;
+typedef struct Gobuf Gobuf;
 typedef struct Sched Sched;
 
 typedef void (*Fn)(void);
@@ -31,6 +32,7 @@ void print_b();
 void print_c();
 void print_d();
 
+extern void cr_call(Gobuf*, Fn) asm("cr_call");
 extern void put_g(G* g);
 extern P* get_idle_p();
 extern void new_m(P*);
@@ -51,7 +53,14 @@ struct Sched {
 	pthread_cond_t nonEmpty;
 };
 
+struct Gobuf {
+	void* sp;
+	void* pc;
+};
+
 struct G {
+	void* stack_base;
+	Gobuf gobuf;
 	Fn f;
 	G* next;
 };
@@ -101,13 +110,19 @@ Sched sched;
 G* malloc_g(int stack_size)
 {
 	G* g = malloc(sizeof(G));
+
+	void* mc = malloc(stack_size);
+	g->stack_base = mc + stack_size;
+
 	return g;
 }
 
 void new_g(Fn f)
 {
 	G* g = malloc_g(G_STACK_SIZE);
+
 	g->f = f;
+	g->gobuf.sp = g->stack_base;
 
 	put_g(g);
 }
@@ -189,7 +204,7 @@ int clone_start(M* mm)
 
 	while (1) {
 		G* g = get_g(p);
-		g->f();
+		cr_call(&g->gobuf, g->f);
 	}
 
 	return 0;
@@ -233,8 +248,9 @@ int main()
 	CR(print_c);
 	CR(print_d);
 
-	sleep(3);
+	sleep(2);
 
+	puts("main end! \n");
 	return 0;
 }
 
