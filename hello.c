@@ -12,7 +12,7 @@
 #define N 10
 #define P_SIZE 2
 #define G_SIZE_PER_P 2
-#define G_STACK_SIZE (1024 * 8)
+#define G_STACK_SIZE (1024)
 
 #define CR(a)     \
 	{             \
@@ -22,7 +22,6 @@
 typedef struct G G;
 typedef struct P P;
 typedef struct M M;
-typedef struct Gobuf Gobuf;
 typedef struct Sched Sched;
 
 typedef void (*Fn)(void);
@@ -32,20 +31,9 @@ void print_b();
 void print_c();
 void print_d();
 
-extern void* schedule();
-extern void sys_write_call(char*, int) asm("sys_write_call");
-extern void cr_call(Gobuf*, Fn) asm("cr_call");
-extern void cr_switch(Gobuf*) asm("cr_switch");
-extern void put_g(P* p, G* g);
+extern void put_g(G* g);
 extern P* get_idle_p();
 extern void new_m(P*);
-extern void* gexit();
-
-typedef enum GStatus {
-	Grunnable,
-	Grunning,
-	Gdead,
-} GStatus;
 
 typedef struct GQueue {
 	G* head;
@@ -63,17 +51,9 @@ struct Sched {
 	pthread_cond_t nonEmpty;
 };
 
-struct Gobuf {
-	void* sp;
-	void* pc;
-};
-
 struct G {
-	void* stack_base;
-	Gobuf gobuf;
 	Fn f;
 	G* next;
-	GStatus gs;
 };
 
 struct P {
@@ -86,7 +66,6 @@ struct P {
 };
 
 struct M {
-	G* g0;
 	P* p;
 };
 
@@ -116,24 +95,12 @@ G* dequeue(GQueue* q)
 
 	return r;
 }
+
 Sched sched;
-
-// current running m
-__thread M* m;
-// current running g
-__thread G* g;
-
-M m0;
-G g0;
 
 G* malloc_g(int stack_size)
 {
-
 	G* g = malloc(sizeof(G));
-
-	void* mc = malloc(stack_size);
-	g->stack_base = mc + stack_size;
-
 	return g;
 }
 
@@ -141,11 +108,8 @@ void new_g(Fn f)
 {
 	G* g = malloc_g(G_STACK_SIZE);
 	g->f = f;
-	g->gobuf.sp = g->stack_base;
-	g->gobuf.pc = gexit;
-	g->gs = Grunnable;
 
-	put_g(m->p, g);
+	put_g(g);
 }
 
 G* get_g(P* p)
@@ -178,13 +142,8 @@ G* get_g(P* p)
 	return dequeue(&p->runq);
 }
 
-void put_g(P* p, G* g)
+void put_g(G* g)
 {
-
-	if (p->runq.gsize < G_SIZE_PER_P) {
-		enqueue(&p->runq, g);
-		return;
-	}
 
 	pthread_mutex_lock(&sched.mutex);
 
@@ -197,17 +156,6 @@ void put_g(P* p, G* g)
 	if (idle_p != NULL) {
 		new_m(idle_p);
 	}
-}
-
-void* gexit()
-{
-	g->gs = Gdead;
-	free(g);
-
-	printf("--- g dead --- \n");
-	schedule();
-
-	return NULL;
 }
 
 P* new_p()
@@ -235,51 +183,25 @@ P* get_idle_p()
 	return p;
 }
 
-void start_m(M* mm)
-{
-	m = mm;
-
-	schedule();
-}
-
-void run_m()
-{
-
-	if (g != m->g0) {
-		printf("bad run\n");
-		exit(-1);
-	}
-
-	schedule();
-}
-
 int clone_start(M* mm)
 {
-	m = mm;
-	g = mm->g0;
+	P* p = mm->p;
 
-	run_m();
+	while (1) {
+		G* g = get_g(p);
+		g->f();
+	}
 
 	return 0;
 }
 
 void new_m(P* p)
 {
-
 	M* mm = (M*)malloc(sizeof(M));
 	mm->p = p;
 
-	int thread_stack_size = 1024;
-	G* g0 = malloc_g(thread_stack_size);
-
-	mm->g0 = g0;
-
-	pthread_attr_t attr;
-	pthread_attr_init(&attr);
-	pthread_attr_setstack(&attr, g0->stack_base, thread_stack_size);
-
 	pthread_t t;
-	int r = pthread_create(&t, &attr, (void*)clone_start, mm);
+	int r = pthread_create(&t, NULL, (void*)clone_start, mm);
 	if (r != 0) {
 		printf("pthread create failed, r: %d\n", r);
 		exit(-1);
@@ -288,9 +210,8 @@ void new_m(P* p)
 
 void init_sched()
 {
-	m->p = new_p();
 
-	for (int i = 1; i < P_SIZE; i++) {
+	for (int i = 0; i < P_SIZE; i++) {
 
 		P* mp = new_p();
 		mp->next = sched.idle_p;
@@ -301,70 +222,40 @@ void init_sched()
 	pthread_cond_init(&sched.nonEmpty, NULL);
 }
 
-void* schedule()
+int main()
 {
-	P* p = m->p;
+	puts("main start! \n");
 
-	if (g != NULL && g->gs == Grunning) {
-		g->gs = Grunnable;
-		put_g(p, g);
-	}
-
-	G* rg = get_g(p);
-	if (rg == NULL) {
-		printf(" --- g is null, sleep \n");
-		return NULL;
-	}
-	rg->gs = Grunning;
-	g = rg;
-
-	if (g->gobuf.pc == gexit) {
-		cr_call(&g->gobuf, g->f);
-	}
-
-	cr_switch(&g->gobuf);
-
-	return NULL;
-}
-
-int _main()
-{
-
-	printf("main start! \n");
+	init_sched();
 
 	CR(print_a);
 	CR(print_b);
 	CR(print_c);
 	CR(print_d);
 
-	printf("main done! \n");
+	sleep(3);
+
 	return 0;
 }
 
 void print_a()
 {
 	for (int i = 0; i < N; i++) {
-		char src[10];
-		sprintf(src, "AA_%d\n", i);
-		sys_write_call(src, strlen(src));
+		printf("AA_%d\n", i);
 	}
 }
 
 void print_b()
 {
 	for (int i = 0; i < 2 * N; i++) {
-		char src[10];
-		sprintf(src, "BBB_%d\n", i);
-		sys_write_call(src, strlen(src));
+		printf("BBB_%d\n", i);
 	}
 }
 
 void print_c()
 {
 	for (int i = 0; i < N * 3 / 2; i++) {
-		char src[10];
-		sprintf(src, "CCCC_%d\n", i);
-		sys_write_call(src, strlen(src));
+		printf("CCCC_%d\n", i);
 	}
 }
 
