@@ -10,7 +10,7 @@
 #include <unistd.h>
 
 #define N 10
-#define P_SIZE 1
+#define P_SIZE 0
 #define G_SIZE_PER_P 20
 #define G_STACK_SIZE (1024 * 2)
 
@@ -98,6 +98,8 @@ __thread M* m;
 // current running g
 __thread G* g;
 
+M m0;
+
 Sched sched;
 
 void enqueue(GQueue* q, G* g)
@@ -163,6 +165,7 @@ G* get_g(P* p)
 
 		G* g = dequeue(&sched.global_q);
 		while (g == NULL && i == 0) {
+			puts("no runnable g, wait...");
 			pthread_cond_wait(&sched.nonEmpty, &sched.mutex);
 			g = dequeue(&sched.global_q);
 		}
@@ -204,7 +207,6 @@ void* gexit()
 	puts("--- g dead --- ");
 
 	g->status = Gdead;
-	free(g);
 
 	schedule();
 
@@ -260,6 +262,7 @@ void new_m(P* p)
 
 void init_sched()
 {
+	m->p = new_p();
 
 	for (int i = 0; i < P_SIZE; i++)
 	{
@@ -296,24 +299,14 @@ void* schedule()
 	return NULL;
 }
 
-int main()
+int _main()
 {
-	puts("main start! \n");
-
-	M mm;
-	mm.p = new_p();
-	mm.p->runq.gsize = G_SIZE_PER_P;
-
-	m = &mm;
-
-	init_sched();
+	puts("main start!");
 
 	CR(print_a);
 	CR(print_b);
 	CR(print_c);
 	CR(print_d);
-
-	sleep(2);
 
 	puts("main end! \n");
 	return 0;

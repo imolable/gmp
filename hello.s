@@ -1,5 +1,5 @@
 .globl  cr_call, write_call, cr_schedule, cr_switch
-
+.globl main
 
 .MACRO SAVE_REG
 
@@ -95,4 +95,20 @@ cr_call:
 	// call f
 	jmp *%rax
 
+ret
+
+main:
+
+	pushq %rbp
+	movq %rsp, %rbp
+
+	leaq m0(%rip), %rbx
+	movq %rbx, %fs:m@tpoff
+
+	call init_sched
+	leaq  _main(%rip), %rdi
+	call new_g
+
+	call schedule
+	int $3
 ret
