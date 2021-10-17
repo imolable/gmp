@@ -207,7 +207,6 @@ void* gexit()
 	puts("--- g dead --- ");
 
 	g->status = Gdead;
-	free(g);
 
 	schedule();
 
