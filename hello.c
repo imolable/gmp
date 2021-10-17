@@ -10,9 +10,9 @@
 #include <unistd.h>
 
 #define N 10
-#define P_SIZE 0
-#define G_SIZE_PER_P 20
-#define G_STACK_SIZE (1024 * 2)
+#define P_SIZE 1
+#define G_SIZE_PER_P 2
+#define G_STACK_SIZE (1024 * 4)
 
 #define CR(a)     \
 	{             \
@@ -35,10 +35,11 @@ void print_d();
 extern void cr_call(Gobuf*, Fn) asm("cr_call");
 extern void write_call(char*, int) asm("write_call");
 extern void cr_switch(Gobuf*) asm("cr_switch");
+extern void* g0_call(Fn f) asm("g0_call");
 extern void put_g(P* p, G* g);
 extern P* get_idle_p();
 extern void new_m(P*);
-extern void* gexit();
+extern void* g0exit();
 extern void* schedule();
 
 typedef enum GStatus {
@@ -90,6 +91,7 @@ struct P
 
 struct M
 {
+	G* g0;
 	P* p;
 };
 
@@ -99,6 +101,7 @@ __thread M* m;
 __thread G* g;
 
 M m0;
+G g0;
 
 Sched sched;
 
@@ -145,7 +148,7 @@ void new_g(Fn f)
 
 	g->f = f;
 	g->gobuf.sp = g->stack_base;
-	g->gobuf.pc = gexit;
+	g->gobuf.pc = g0exit;
 	g->status = Grunnable;
 
 	put_g(m->p, g);
@@ -213,6 +216,12 @@ void* gexit()
 	return NULL;
 }
 
+void* g0exit()
+{
+	g0_call((Fn)gexit);
+	return NULL;
+}
+
 P* new_p()
 {
 	P* mp = (P*)malloc(sizeof(P));
@@ -241,19 +250,29 @@ P* get_idle_p()
 int clone_start(M* mm)
 {
 	m = mm;
+	g = mm->g0;
 
 	schedule();
 
 	return 0;
 }
 
+
 void new_m(P* p)
 {
+	int thread_stack_size = 1024*16;
+	G* g =  malloc_g(thread_stack_size);
+
 	M* mm = (M*)malloc(sizeof(M));
 	mm->p = p;
+	mm->g0 = g;
+
+	pthread_attr_t attr;
+	pthread_attr_init(&attr);
+	pthread_attr_setstack(&attr, g->stack_base, thread_stack_size);
 
 	pthread_t t;
-	int r = pthread_create(&t, NULL, (void*)clone_start, mm);
+	int r = pthread_create(&t, &attr, (void*)clone_start, mm);
 	if (r != 0) {
 		printf("pthread create failed, r: %d\n", r);
 		exit(-1);
@@ -290,7 +309,7 @@ void* schedule()
 	gotg->status = Grunning;
 	g = gotg;
 
-	if (g->gobuf.pc == gexit)
+	if (g->gobuf.pc == g0exit)
 	{
 		cr_call(&g->gobuf, g->f);
 	}

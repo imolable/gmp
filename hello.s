@@ -1,4 +1,4 @@
-.globl  cr_call, write_call, cr_schedule, cr_switch
+.globl  cr_call, write_call, cr_switch, g0_call
 .globl main
 
 .MACRO SAVE_REG
@@ -38,6 +38,9 @@
 
 write_call:
 
+	pushq %rbp
+	movq %rsp, %rbp
+
 	pushq %rdi
 	pushq %rsi
 	popq %rdx
@@ -47,27 +50,15 @@ write_call:
 
 	SAVE_REG
 
-	movq %rsp, %rdi
-	call cr_schedule
+	leaq  schedule(%rip), %rdi
+	call g0_call
 
 	RESTORE_REG
 	syscall
 
+	leave
 ret
 
-
-cr_schedule:
-
-	movq %fs:g@tpoff, %rax
-	leaq 8(%rax), %rax
-
-	movq %rdi, (%rax)
-	movq (%rsp), %rdx
-	movq %rdx, 8(%rax)
-
-
-	call schedule
-ret
 
 // cr_switch(Gobuf *buf)
 cr_switch:
@@ -97,13 +88,40 @@ cr_call:
 
 ret
 
+// g0_call(Fn f), call f on g0's stack
+// f in rdi
+g0_call:
+
+	movq %fs:g@tpoff, %rax
+	leaq 8(%rax), %rax
+
+	leaq 8(%rsp), %rdx
+	movq %rdx, (%rax)
+	movq (%rsp), %rdx
+	movq %rdx, 8(%rax)
+
+	//	switch to g0
+	movq %fs:m@tpoff, %rax
+	movq (%rax), %rax
+
+	movq (%rax), %rbp
+	movq (%rax), %rsp
+	call *%rdi
+ret
+
 main:
 
 	pushq %rbp
 	movq %rsp, %rbp
 
+	leaq g0(%rip), %rax
+	movq %rax, %fs:g@tpoff
+	movq %rsp, (%rax)
+
 	leaq m0(%rip), %rbx
 	movq %rbx, %fs:m@tpoff
+	// g0 -> m.g0
+	movq %rax,(%rbx)
 
 	call init_sched
 	leaq  _main(%rip), %rdi
