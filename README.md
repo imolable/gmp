@@ -179,6 +179,45 @@ M0 初始化完成后，执行的第一个G，其实就是`_main`。在`_main`�
 请切到分支`feat/demo-0.0.5`
 
 
+## feat/demo-0.0.5
+
+这个版本新增加了`g0_call(Fn)`函数，就是在g0栈上执行函数`Fn`。因此，`gexit`就得被换成`go_call(gexit)`，即`g0exit`。还有在`schedule`的地方也得改成`g0_call(schedule)`。
+
+看看`g0_call`的具体实现
+
+```c
+// g0_call(Fn f), call f on g0's stack
+// f in rdi
+g0_call:
+
+	movq %fs:g@tpoff, %rax
+	leaq 8(%rax), %rax
+
+	leaq 8(%rsp), %rdx
+	movq %rdx, (%rax)
+	movq (%rsp), %rdx
+	movq %rdx, 8(%rax)
+
+	//	switch to g0
+	movq %fs:m@tpoff, %rax
+	movq (%rax), %rax
+
+	movq (%rax), %rbp
+	movq (%rax), %rsp
+	call *%rdi
+ret
+```
+
+前面一部分和`cr_schedule`逻辑一样，保存当前运行G的上下文。后面一部分就是切换到g0栈上执行。如果你把g0当做一个普通的G来看待，就其实从一个G切换到另外一个G的过程，没有什么特殊的地方，只是这个g0没有可执行的代码。
+
+g0栈其实就是OS Thread的栈。在`pthread_create`创建线程的时候，申请了g0栈作为线程栈。
+
+至此，GMP模型有了一个初步的轮廓。但是还有一些功能没有实现，比如 P 的`handoff`, `netpoller`等。
+
+请切到分支 ...🤣
+
+**TBD...** 
+
 
 
 
