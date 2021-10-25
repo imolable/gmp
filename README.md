@@ -61,7 +61,7 @@ void* schedule()
 想要G运行在自己的栈空间，得给G分配一块内存区域供G作为栈来使用，并用`stack_base`指针指向分配空间的高地址（栈底是高地址，栈顶是低地址）。在执行G的函数时，我们将寄存器`SP`（栈顶指针）,`BP`（栈底指针）设置成`stack_base`的值，这样G的函数执行时，就运行在了自己的栈空间上，栈底是`stack_base`。汇编函数`cr_call(Gobuf*, Fn)`实现了这个的功能。
 
 
-```
+```c
 cr_call:
 
 movq (%rdi), %rax
@@ -91,15 +91,78 @@ ret
 ![0.0.2](./images/0.0.2.png)
 
 
-这个版本只是在函数`Fn`执行完成后进行调度。并不是像Golang的协作式调度，进入系统调用时调度。下个版本实现*协作式调度*。
+这个版本只是在函数`Fn`执行完成后进行调度。并不是像Golang的协作式调度，进入系统调用时调度。下个版本实现*协作式调度*（🤣）。
 
 请切到分支`feat/demo-0.0.3`
 
 
+## feat/demo-0.0.3
+
+这个版本将在进入系统调用时进行调度。当然并不是所有的系统调用都进行调度，只是hook了`printf`函数，修改为`write_call`，只在执行`write_call`函数时才会进行调度。
+
+总体改动也不大，增加了3个汇编函数`write_call`, `cr_schedule`, `cr_switch`。
+
+- `write_call` 是调用系统函数`write`将内容打印在`stdout`，在调用之前进行*协作式调度*（保存上下文，执行下一个G)。
+- `cr_schedule` 保存当前G的`Gobuf`，即`sp`,`pc`。然后再执行`schedule`调度，寻找下一个可执行G，执行。
+- `cr_switch` 重新执行之前被调度的G，恢复G执行的上下文。
+
+在调用`cr_schedule`时，栈布局如图
+
+![0.0.3-1](./images/0.0.3-1.png)
+
+`call`指令首先会将下一段要执行的指令地址`push`到栈中。即`rsp`寄存器所指向的内存的值是`pc`将要执行的地址（`call cr_schedule`，`cr_schedule`函数执行完成后，就执行`pc`地址指令，和`gexit`被执行的逻辑一样，`cr_schedule`执行`ret`后，`saved pc`被弹栈，执行）。
+
+```c
+cr_schedule:
+
+    // 当前正在执行的G的地址 -> rax
+	movq %fs:g@tpoff, %rax
+    // &g.gobuf -> rax
+	leaq 8(%rax), %rax
+
+    // sp作为参数传递，sp -> gobuf.sp
+	movq %rdi, (%rax)
+	movq (%rsp), %rdx
+    // saved pc -> pc
+	movq %rdx, 8(%rax)
+
+	call schedule
+ret
+```
 
 
+执行完`cr_schedule`后，栈布局如图
 
+![0.0.3-2](./images/0.0.3-2.png)
 
+此时`gobuf.pc`保存了下一段要执行的指令`RESTORE_REG`（不要在意宏展开）。`gobuf.sp`指向的是`保存的寄存器`的栈顶。上下文都已经压栈。此时，可以放心的切换到其他的G去执行了。
+
+如何恢复G的执行呢？`cr_switch`
+
+我们将G调度的时候，G执行到了函数`write_call`的`call cr_schedule`这段指令，后面即将执行`RESTORE_REG`。因此在恢复G执行的时候，我们需要让G继续执行`RESTORE_REG`。
+
+```c
+// cr_switch(Gobuf *buf)
+cr_switch:
+
+    // gobuf.sp -> rsp
+	movq (%rdi), %rsp
+    // gobuf.pc -> rax
+	movq 8(%rdi), %rax
+
+    // 执行pc处的指令
+	jmp *%rax
+ret
+```
+在执行`cr_switch`之前，栈的布局如上图。在执行到`movq 8(%rdi), %rax`指令后，布局如下图
+
+![0.0.3-3](./images/0.0.3-3.png)
+
+`rsp`的值正好是了`保存的寄存器`的顶端，然后`jmp *%rax`执行`RESTORE_REG`将寄存器的值都出栈。恢复了G的上下文，继续执行。
+
+以上虽然完成了G运行在自己的栈空间和协作式调度，但依旧是基于`生产者-消费者`模型。主线程只能把G `enqueue` 到`GRQ`中，并不能作为一个工作线程来调度。下一个版本将主线程实现成M0，让M0可作为工作线程。
+
+请切到分支`feat/demo-0.0.4`
 
 
 ### Ref
